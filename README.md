@@ -223,3 +223,7 @@ A production connection must be approved by a workspace admin, bind credentials 
 - Skill editing and production remote-asset hosting
 
 For a real Notion–Claude integration, replace mock modules with an authorized Notion workspace service, persist connection/grant and sync metadata, map explicit sharing ACLs into every query, issue scoped/rotatable credentials, add revocation/auditing/rate limits, host and scan immutable assets, and generate/test Claude’s final plugin manifest and installation handshake.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
