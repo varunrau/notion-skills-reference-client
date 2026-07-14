@@ -41,7 +41,10 @@ export type SyncOptions = {
 };
 
 type MaterializeOptions = {
-  fetchDirectory: (directoryId: string) => Promise<DirectoryResponse>;
+  fetchDirectory: (
+    directoryId: string,
+    startCursor?: string,
+  ) => Promise<DirectoryResponse>;
   fetchImpl?: Fetch;
   logger?: Logger;
   timeoutMs?: number;
@@ -280,44 +283,63 @@ async function materializeContents(
   options: Required<MaterializeOptions>,
   ancestors: Set<string>,
 ): Promise<void> {
-  validatePathSegment(response.directory.id);
-  validatePathSegment(response.directory.name);
-  if (ancestors.has(response.directory.id)) {
-    throw new Error(`Directory cycle detected at '${response.directory.id}'.`);
+  validatePathSegment(response.id);
+  validatePathSegment(response.name);
+  if (ancestors.has(response.id)) {
+    throw new Error(`Directory cycle detected at '${response.id}'.`);
   }
-  const nextAncestors = new Set(ancestors).add(response.directory.id);
+  const nextAncestors = new Set(ancestors).add(response.id);
   await mkdir(destination, { recursive: true });
 
-  for (const [name, node] of Object.entries(response.contents).sort(([a], [b]) =>
-    a.localeCompare(b),
-  )) {
-    const childPath = safeChild(destination, name);
-    if (node.type === "file") {
-      await writeFile(childPath, node.content, "utf8");
-      continue;
-    }
-    if (node.type === "url") {
-      await downloadHttps(
-        node.url,
-        childPath,
-        options.fetchImpl,
-        options.timeoutMs,
-        options.maxDownloadBytes,
-        options.logger,
-      );
-      continue;
+  let page = response;
+  const seenCursors = new Set<string>();
+  while (true) {
+    if (
+      page.id !== response.id ||
+      page.name !== response.name ||
+      page.contents.object !== "list" ||
+      page.contents.type !== "content" ||
+      !Array.isArray(page.contents.results)
+    ) {
+      throw new Error(`Invalid directory page for '${response.id}'.`);
     }
 
-    validatePathSegment(node.id);
-    validatePathSegment(node.name);
-    if (node.name !== name) {
-      throw new Error(`Directory entry '${name}' has mismatched name '${node.name}'.`);
+    for (const node of [...page.contents.results].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const childPath = safeChild(destination, node.name);
+      if (node.type === "file") {
+        await writeFile(childPath, node.content, "utf8");
+        continue;
+      }
+      if (node.type === "url") {
+        await downloadHttps(
+          node.url,
+          childPath,
+          options.fetchImpl,
+          options.timeoutMs,
+          options.maxDownloadBytes,
+          options.logger,
+        );
+        continue;
+      }
+
+      validatePathSegment(node.id);
+      validatePathSegment(node.name);
+      const child = await options.fetchDirectory(node.id);
+      if (child.id !== node.id || child.name !== node.name) {
+        throw new Error(`Directory response did not match '${node.id}'.`);
+      }
+      await materializeContents(child, childPath, options, nextAncestors);
     }
-    const child = await options.fetchDirectory(node.id);
-    if (child.directory.id !== node.id || child.directory.name !== node.name) {
-      throw new Error(`Directory response did not match '${node.id}'.`);
+
+    if (!page.contents.has_more) break;
+    const cursor = page.contents.next_cursor;
+    if (!cursor || seenCursors.has(cursor)) {
+      throw new Error(`Invalid pagination cursor for directory '${response.id}'.`);
     }
-    await materializeContents(child, childPath, options, nextAncestors);
+    seenCursors.add(cursor);
+    page = await options.fetchDirectory(response.id, cursor);
   }
 }
 
@@ -358,6 +380,54 @@ async function rollback(backups: Backup[], installed: string[]): Promise<void> {
   }
 }
 
+async function fetchAllPlugins(
+  baseUrl: string,
+  fetchImpl: Fetch,
+  headers: HeadersInit,
+  timeoutMs: number,
+  logger: Logger,
+): Promise<PluginSummary[]> {
+  const plugins: PluginSummary[] = [];
+  const seenCursors = new Set<string>();
+  let startCursor: string | undefined;
+
+  while (true) {
+    const url = new URL(`${baseUrl}/v1/skills/plugins`);
+    url.searchParams.set("page_size", "100");
+    if (startCursor) url.searchParams.set("start_cursor", startCursor);
+    const page = await fetchJson<PluginListResponse>(
+      url.toString(),
+      fetchImpl,
+      headers,
+      timeoutMs,
+      logger,
+    );
+    if (
+      page.object !== "list" ||
+      page.type !== "plugin" ||
+      !Array.isArray(page.results)
+    ) {
+      throw new Error("Plugin catalog response is not a plugin list.");
+    }
+    plugins.push(...page.results);
+    if (!page.has_more) break;
+    if (!page.next_cursor || seenCursors.has(page.next_cursor)) {
+      throw new Error("Plugin catalog returned an invalid pagination cursor.");
+    }
+    seenCursors.add(page.next_cursor);
+    startCursor = page.next_cursor;
+  }
+
+  const ids = new Set<string>();
+  for (const plugin of plugins) {
+    if (ids.has(plugin.id)) {
+      throw new Error(`Plugin catalog returned duplicate id '${plugin.id}'.`);
+    }
+    ids.add(plugin.id);
+  }
+  return plugins;
+}
+
 export async function syncPlugins(options: SyncOptions): Promise<void> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const logger = options.logger ?? console;
@@ -373,35 +443,20 @@ export async function syncPlugins(options: SyncOptions): Promise<void> {
   const headers = new Headers();
   if (options.token) headers.set("Authorization", `Bearer ${options.token}`);
 
-  const catalogUrl = `${baseUrl}/v1/skills/plugins`;
-  const catalogExchange = await request(
-    catalogUrl,
+  const plugins = await fetchAllPlugins(
+    baseUrl,
     fetchImpl,
     headers,
     timeoutMs,
     logger,
   );
-  if (!catalogExchange.response.ok) {
-    throw responseError(
-      catalogUrl,
-      catalogExchange.response,
-      catalogExchange.body,
-    );
-  }
-  if (!catalogExchange.body || typeof catalogExchange.body === "string") {
-    throw new Error(`Expected a JSON response from ${catalogUrl}.`);
-  }
-  const catalog = catalogExchange.body as PluginListResponse;
-  if (!Array.isArray(catalog.plugins)) {
-    throw new Error("Plugin catalog response is missing 'plugins'.");
-  }
   const previous = state?.plugins ?? {};
-  const serverIds = new Set(catalog.plugins.map((plugin) => plugin.id));
+  const serverIds = new Set(plugins.map((plugin) => plugin.id));
   const removed = Object.keys(previous).filter((id) => !serverIds.has(id)).sort();
   const changed: PluginSummary[] = [];
   let unchanged = 0;
 
-  for (const plugin of catalog.plugins) {
+  for (const plugin of plugins) {
     validatePathSegment(plugin.id);
     for (const directory of plugin.skillDirectories) {
       validatePathSegment(directory.id);
@@ -433,14 +488,20 @@ export async function syncPlugins(options: SyncOptions): Promise<void> {
   const directoryHeaders: HeadersInit = options.token
     ? { Authorization: `Bearer ${options.token}` }
     : {};
-  const fetchDirectory = (directoryId: string) =>
-    fetchJson<DirectoryResponse>(
+  const fetchDirectory = (directoryId: string, startCursor?: string) => {
+    const url = new URL(
       `${baseUrl}/v1/skills/directories/${encodeURIComponent(directoryId)}`,
+    );
+    url.searchParams.set("page_size", "100");
+    if (startCursor) url.searchParams.set("start_cursor", startCursor);
+    return fetchJson<DirectoryResponse>(
+      url.toString(),
       fetchImpl,
       directoryHeaders,
       timeoutMs,
       logger,
     );
+  };
 
   try {
     for (const plugin of changed) {
@@ -451,8 +512,8 @@ export async function syncPlugins(options: SyncOptions): Promise<void> {
       for (const summary of plugin.skillDirectories) {
         const root = await fetchDirectory(summary.id);
         if (
-          root.directory.id !== summary.id ||
-          root.directory.name !== summary.name
+          root.id !== summary.id ||
+          root.name !== summary.name
         ) {
           throw new Error(`Directory response did not match '${summary.id}'.`);
         }
@@ -496,7 +557,7 @@ export async function syncPlugins(options: SyncOptions): Promise<void> {
       version: 2,
       baseUrl,
       plugins: Object.fromEntries(
-        catalog.plugins.map((plugin) => [
+        plugins.map((plugin) => [
           plugin.id,
           { updatedAt: plugin.updatedAt },
         ]),

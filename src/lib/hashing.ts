@@ -1,10 +1,5 @@
 import { createHash } from "node:crypto";
-import type {
-  PluginDefinition,
-  PluginListResponse,
-  PluginSummary,
-  VirtualContentNode,
-} from "./types";
+import type { PluginDefinition, PluginSummary, VirtualContentNode } from "./types";
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -79,10 +74,8 @@ export function summarizePlugin(plugin: PluginDefinition): PluginSummary {
 
 export function buildPluginList(
   plugins: PluginDefinition[],
-): PluginListResponse {
-  return {
-    plugins: [...plugins]
-      .sort((left, right) => left.id.localeCompare(right.id))
-      .map(summarizePlugin),
-  };
+): PluginSummary[] {
+  return [...plugins]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map(summarizePlugin);
 }

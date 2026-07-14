@@ -13,49 +13,61 @@ import type {
 } from "../reference-client/types";
 
 const roots: string[] = [];
+const directoryContents = (
+  results: DirectoryResponse["contents"]["results"],
+  nextCursor: string | null = null,
+): DirectoryResponse["contents"] => ({
+  object: "list",
+  results,
+  next_cursor: nextCursor,
+  has_more: nextCursor !== null,
+  type: "content",
+  content: {},
+});
+
 const rootDirectory: DirectoryResponse = {
-  directory: {
-    id: "skill-one",
-    type: "directory",
-    name: "skill-one",
-  },
-  contents: {
-    "SKILL.md": {
+  id: "skill-one",
+  type: "directory",
+  name: "skill-one",
+  contents: directoryContents([
+    {
+      name: "SKILL.md",
       type: "file",
       mimeType: "text/markdown",
       content: "---\nname: skill-one\ndescription: Test.\n---\n",
     },
-    "remote-reference.txt": {
+    {
+      name: "remote-reference.txt",
       type: "url",
       url: "https://www.example.com/reference.txt",
     },
-    nested: {
+    {
       id: "nested-directory",
       type: "directory",
       name: "nested",
     },
-  },
+  ]),
 };
 
 const nestedDirectory: DirectoryResponse = {
-  directory: {
-    id: "nested-directory",
-    type: "directory",
-    name: "nested",
-  },
-  contents: {
-    "reference.md": {
+  id: "nested-directory",
+  type: "directory",
+  name: "nested",
+  contents: directoryContents([
+    {
+      name: "reference.md",
       type: "file",
       mimeType: "text/markdown",
       content: "# Reference",
     },
-  },
+  ]),
 };
 
 const currentUpdatedAt = "2026-07-14T18:00:00.000Z";
 
 const list = (updatedAt = currentUpdatedAt): PluginListResponse => ({
-  plugins: [
+  object: "list",
+  results: [
     {
       id: "plugin-one",
       name: "Plugin One",
@@ -71,6 +83,10 @@ const list = (updatedAt = currentUpdatedAt): PluginListResponse => ({
       ],
     },
   ],
+  next_cursor: null,
+  has_more: false,
+  type: "plugin",
+  plugin: {},
 });
 
 async function tempRoot() {
@@ -93,17 +109,17 @@ function jsonResponse(
 function mockServer(pluginList = list()) {
   return vi.fn(
     async (input: string | URL | Request) => {
-      const url = String(input);
-      if (url.endsWith("/v1/skills/plugins")) {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/skills/plugins") {
         return jsonResponse(pluginList);
       }
-      if (url.endsWith("/v1/skills/directories/skill-one")) {
+      if (url.pathname === "/v1/skills/directories/skill-one") {
         return jsonResponse(rootDirectory);
       }
-      if (url.endsWith("/v1/skills/directories/nested-directory")) {
+      if (url.pathname === "/v1/skills/directories/nested-directory") {
         return jsonResponse(nestedDirectory);
       }
-      if (url === "https://www.example.com/reference.txt") {
+      if (url.toString() === "https://www.example.com/reference.txt") {
         return new Response("downloaded reference", {
           headers: {
             "content-length": "20",
@@ -163,9 +179,14 @@ describe("client materialization", () => {
     const root = await tempRoot();
     const malicious: DirectoryResponse = {
       ...rootDirectory,
-      contents: {
-        "../escape": { type: "file", mimeType: "text/plain", content: "bad" },
-      },
+      contents: directoryContents([
+        {
+          name: "../escape",
+          type: "file",
+          mimeType: "text/plain",
+          content: "bad",
+        },
+      ]),
     };
 
     await expect(
@@ -182,9 +203,9 @@ describe("client materialization", () => {
     const root = await tempRoot();
     const withUrl: DirectoryResponse = {
       ...rootDirectory,
-      contents: {
-        "asset.txt": { type: "url", url: "http://example.com/asset.txt" },
-      },
+      contents: directoryContents([
+        { name: "asset.txt", type: "url", url: "http://example.com/asset.txt" },
+      ]),
     };
     const fetchImpl = vi.fn() as unknown as typeof fetch;
 
@@ -196,9 +217,81 @@ describe("client materialization", () => {
     ).rejects.toThrow("must use https:");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it("follows directory content cursors", async () => {
+    const root = await tempRoot();
+    const firstPage: DirectoryResponse = {
+      ...rootDirectory,
+      contents: directoryContents(
+        [
+          {
+            name: "first.md",
+            type: "file",
+            mimeType: "text/markdown",
+            content: "first",
+          },
+        ],
+        "directory-page-2",
+      ),
+    };
+    const secondPage: DirectoryResponse = {
+      ...rootDirectory,
+      contents: directoryContents([
+        {
+          name: "second.md",
+          type: "file",
+          mimeType: "text/markdown",
+          content: "second",
+        },
+      ]),
+    };
+    const fetchDirectory = vi.fn(async () => secondPage);
+    const destination = path.join(root, "skill-one");
+
+    await materializeDirectory(firstPage, destination, { fetchDirectory });
+
+    expect(fetchDirectory).toHaveBeenCalledWith("skill-one", "directory-page-2");
+    await expect(readFile(path.join(destination, "first.md"), "utf8")).resolves.toBe(
+      "first",
+    );
+    await expect(readFile(path.join(destination, "second.md"), "utf8")).resolves.toBe(
+      "second",
+    );
+  });
 });
 
 describe("incremental sync", () => {
+  it("follows plugin catalog cursors", async () => {
+    const root = await tempRoot();
+    const firstPage: PluginListResponse = {
+      ...list(),
+      results: [],
+      has_more: true,
+      next_cursor: "plugin-page-2",
+    };
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      return jsonResponse(
+        url.searchParams.get("start_cursor") === "plugin-page-2"
+          ? list()
+          : firstPage,
+      );
+    }) as unknown as typeof fetch;
+
+    await syncPlugins({
+      baseUrl: "http://example.test",
+      output: path.join(root, "dry-run"),
+      dryRun: true,
+      fetchImpl,
+      logger: { log: vi.fn(), error: vi.fn() },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const secondUrl = new URL(String(vi.mocked(fetchImpl).mock.calls[1][0]));
+    expect(secondUrl.searchParams.get("start_cursor")).toBe("plugin-page-2");
+    expect(secondUrl.searchParams.get("page_size")).toBe("100");
+  });
+
   it("does not create the output directory during a dry run", async () => {
     const root = await tempRoot();
     const output = path.join(root, "not-created");
@@ -251,7 +344,7 @@ describe("incremental sync", () => {
 
     const trace = log.mock.calls.flat().join("\n");
     expect(trace).toContain("authorization: Bearer <redacted>");
-    expect(trace).toContain('"plugins": [');
+    expect(trace).toContain('"results": [');
     expect(trace).not.toContain('"workspaceId"');
     expect(trace).not.toContain('"hash"');
     expect(trace).not.toContain("do-not-print-this-token");
@@ -308,7 +401,7 @@ describe("incremental sync", () => {
     await writeFile(path.join(root, "plugin-one", "managed.txt"), "managed");
     await mkdir(path.join(root, "keep-me"), { recursive: true });
     await writeFile(path.join(root, "keep-me", "unmanaged.txt"), "unmanaged");
-    const emptyList: PluginListResponse = { plugins: [] };
+    const emptyList: PluginListResponse = { ...list(), results: [] };
 
     await syncPlugins({
       baseUrl: "http://example.test",
@@ -333,7 +426,7 @@ describe("incremental sync", () => {
     await writeFile(validFile, "last valid installation");
     const failedFetch = vi.fn(
       async (input: string | URL | Request) => {
-        if (String(input).endsWith("/v1/skills/plugins")) {
+        if (new URL(String(input)).pathname === "/v1/skills/plugins") {
           return jsonResponse(list());
         }
         return jsonResponse({ error: { message: "interrupted" } }, 500);

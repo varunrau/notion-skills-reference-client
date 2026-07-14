@@ -1,6 +1,6 @@
 import type {
-  ContentNode,
-  DirectoryResponse,
+  DirectoryEntry,
+  DirectoryNode,
   VirtualDirectory,
   WorkspaceDefinition,
 } from "./types";
@@ -112,33 +112,24 @@ export function findSharedDirectory(
   }
 }
 
-export function serializeDirectory(
+export function directoryMetadata(directory: VirtualDirectory): DirectoryNode {
+  return {
+    id: directory.id,
+    type: directory.type,
+    name: directory.name,
+    ...(directory.updatedAt ? { updatedAt: directory.updatedAt } : {}),
+  };
+}
+
+export function serializeDirectoryEntries(
   directory: VirtualDirectory,
-): DirectoryResponse {
-  const contents = Object.fromEntries(
+): DirectoryEntry[] {
+  return (
     Object.entries(directory.contents)
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([name, child]): [string, ContentNode] => {
-        if (child.type !== "directory") return [name, child];
-        return [
-          name,
-          {
-            id: child.id,
-            type: child.type,
-            name: child.name,
-            ...(child.updatedAt ? { updatedAt: child.updatedAt } : {}),
-          },
-        ];
-      }),
+      .map(([name, child]): DirectoryEntry => {
+        if (child.type === "directory") return directoryMetadata(child);
+        return { name, ...child };
+      })
   );
-
-  return {
-    directory: {
-      id: directory.id,
-      type: directory.type,
-      name: directory.name,
-      ...(directory.updatedAt ? { updatedAt: directory.updatedAt } : {}),
-    },
-    contents,
-  };
 }

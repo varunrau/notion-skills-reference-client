@@ -18,9 +18,25 @@ export type UrlNode = {
 
 export type ContentNode = DirectoryNode | FileNode | UrlNode;
 
-export type DirectoryResponse = {
-  directory: DirectoryNode;
-  contents: Record<string, ContentNode>;
+export type DirectoryEntry =
+  | DirectoryNode
+  | (FileNode & { name: string })
+  | (UrlNode & { name: string });
+
+export type PaginatedList<T> = {
+  object: "list";
+  results: T[];
+  next_cursor: string | null;
+  has_more: boolean;
+};
+
+export type DirectoryContentsResponse = PaginatedList<DirectoryEntry> & {
+  type: "content";
+  content: Record<string, never>;
+};
+
+export type DirectoryResponse = DirectoryNode & {
+  contents: DirectoryContentsResponse;
 };
 
 export type VirtualDirectory = DirectoryNode & {
@@ -57,8 +73,9 @@ export type PluginSummary = Omit<PluginDefinition, "skillDirectories"> & {
   skillDirectories: SkillDirectorySummary[];
 };
 
-export type PluginListResponse = {
-  plugins: PluginSummary[];
+export type PluginListResponse = PaginatedList<PluginSummary> & {
+  type: "plugin";
+  plugin: Record<string, never>;
 };
 
 export type ApiError = {

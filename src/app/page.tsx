@@ -1,11 +1,34 @@
 import { buildPluginList } from "@/lib/hashing";
-import { serializeDirectory, workspaces } from "@/lib/mock-data";
+import {
+  directoryMetadata,
+  serializeDirectoryEntries,
+  workspaces,
+} from "@/lib/mock-data";
+import type { DirectoryResponse, PluginListResponse } from "@/lib/types";
 
 export default function Home() {
   const workspace = workspaces[0];
-  const pluginList = buildPluginList(workspace.plugins);
+  const plugins = buildPluginList(workspace.plugins);
+  const pluginList: PluginListResponse = {
+    object: "list",
+    results: plugins,
+    next_cursor: null,
+    has_more: false,
+    type: "plugin",
+    plugin: {},
+  };
   const firstDirectory = workspace.plugins[0].skillDirectories[0];
-  const directoryResponse = serializeDirectory(firstDirectory);
+  const directoryResponse: DirectoryResponse = {
+    ...directoryMetadata(firstDirectory),
+    contents: {
+      object: "list",
+      results: serializeDirectoryEntries(firstDirectory),
+      next_cursor: null,
+      has_more: false,
+      type: "content",
+      content: {},
+    },
+  };
   const listEndpoint = "/v1/skills/plugins";
   const directoryEndpoint = `/v1/skills/directories/${firstDirectory.id}`;
 
@@ -35,7 +58,7 @@ export default function Home() {
         </div>
 
         <div className="plugin-grid">
-          {pluginList.plugins.map((plugin) => (
+          {pluginList.results.map((plugin) => (
             <article className="plugin-card" key={plugin.id}>
               <div className="plugin-topline">
                 <span className="status-dot" aria-hidden="true" />

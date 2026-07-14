@@ -23,9 +23,16 @@ describe("skills API", () => {
 
     expect(response.status).toBe(200);
     expect(body.workspaceId).toBeUndefined();
-    expect(body.plugins).toHaveLength(1);
-    expect(body.plugins[0].hash).toBeUndefined();
-    expect(body.plugins[0].skillDirectories).toHaveLength(2);
+    expect(body).toMatchObject({
+      object: "list",
+      type: "plugin",
+      plugin: {},
+      has_more: false,
+      next_cursor: null,
+    });
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0].hash).toBeUndefined();
+    expect(body.results[0].skillDirectories).toHaveLength(2);
   });
 
   it("returns shallow child directory references that can be fetched again", async () => {
@@ -36,23 +43,34 @@ describe("skills API", () => {
     const root = await rootResponse.json();
 
     expect(rootResponse.status).toBe(200);
-    expect(root.directory).toMatchObject({
+    expect(root).toMatchObject({
       id: "skill-dir-project-brief",
       type: "directory",
       name: "project-brief",
     });
-    expect(root.contents["SKILL.md"].content).toContain("name: project-brief");
-    expect(root.contents["example-homepage.html"]).toEqual({
+    expect(root.contents).toMatchObject({
+      object: "list",
+      type: "content",
+      content: {},
+      has_more: false,
+      next_cursor: null,
+    });
+    const entries = Object.fromEntries(
+      root.contents.results.map((entry: { name: string }) => [entry.name, entry]),
+    );
+    expect(entries["SKILL.md"].content).toContain("name: project-brief");
+    expect(entries["example-homepage.html"]).toEqual({
+      name: "example-homepage.html",
       type: "url",
       url: "https://www.example.com/",
     });
-    expect(root.contents.examples).toEqual({
+    expect(entries.examples).toEqual({
       id: "skill-dir-project-brief-examples",
       type: "directory",
       name: "examples",
       updatedAt: "2026-07-14T19:00:00.000Z",
     });
-    expect(root.contents.examples.contents).toBeUndefined();
+    expect(entries.examples.contents).toBeUndefined();
 
     const nestedResponse = await getDirectory(
       new Request(
@@ -62,8 +80,50 @@ describe("skills API", () => {
     );
     const nested = await nestedResponse.json();
     expect(nestedResponse.status).toBe(200);
-    expect(nested.directory.name).toBe("examples");
-    expect(nested.contents["launch.md"].content).toContain("Launch brief example");
+    expect(nested.name).toBe("examples");
+    expect(nested.contents.results[0].content).toContain("Launch brief example");
+  });
+
+  it("paginates directory contents with opaque cursors", async () => {
+    const firstResponse = await getDirectory(
+      new Request(
+        "http://localhost/v1/skills/directories/skill-dir-project-brief?page_size=1",
+      ),
+      directoryContext("skill-dir-project-brief"),
+    );
+    const first = await firstResponse.json();
+
+    expect(first.contents.results).toHaveLength(1);
+    expect(first.contents.has_more).toBe(true);
+    expect(typeof first.contents.next_cursor).toBe("string");
+
+    const secondResponse = await getDirectory(
+      new Request(
+        `http://localhost/v1/skills/directories/skill-dir-project-brief?page_size=1&start_cursor=${encodeURIComponent(first.contents.next_cursor)}`,
+      ),
+      directoryContext("skill-dir-project-brief"),
+    );
+    const second = await secondResponse.json();
+
+    expect(second.contents.results).toHaveLength(1);
+    expect(second.contents.results[0].name).not.toBe(
+      first.contents.results[0].name,
+    );
+  });
+
+  it("rejects invalid pagination parameters", async () => {
+    const tooLarge = await getPlugins(
+      new Request("http://localhost/v1/skills/plugins?page_size=101"),
+    );
+    const invalidCursor = await getPlugins(
+      new Request("http://localhost/v1/skills/plugins?start_cursor=not-a-cursor"),
+    );
+
+    expect(tooLarge.status).toBe(400);
+    expect(invalidCursor.status).toBe(400);
+    await expect(tooLarge.json()).resolves.toMatchObject({
+      error: { code: "validation_error" },
+    });
   });
 
   it("returns a conventional unknown directory error", async () => {

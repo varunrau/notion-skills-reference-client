@@ -85,12 +85,14 @@ All IDs are stable strings. All error responses use `{ "error": { "code": string
 
 ```http
 GET /v1/skills/plugins
+GET /v1/skills/plugins?page_size=25&start_cursor=<opaque-cursor>
 Authorization: Bearer <optional-token>
 ```
 
 ```json
 {
-  "plugins": [
+  "object": "list",
+  "results": [
     {
       "id": "notion-workspace-skills",
       "name": "Notion Workspace Skills",
@@ -105,7 +107,11 @@ Authorization: Bearer <optional-token>
         }
       ]
     }
-  ]
+  ],
+  "next_cursor": null,
+  "has_more": false,
+  "type": "plugin",
+  "plugin": {}
 }
 ```
 
@@ -115,37 +121,47 @@ The workspace is implied by the authenticated connection rather than encoded in 
 
 ```http
 GET /v1/skills/directories/skill-dir-project-brief
+GET /v1/skills/directories/skill-dir-project-brief?page_size=25&start_cursor=<opaque-cursor>
 Authorization: Bearer <optional-token>
 ```
 
 ```json
 {
-  "directory": {
-    "id": "skill-dir-project-brief",
-    "type": "directory",
-    "name": "project-brief",
-    "updatedAt": "2026-07-14T18:00:00.000Z"
-  },
+  "id": "skill-dir-project-brief",
+  "type": "directory",
+  "name": "project-brief",
+  "updatedAt": "2026-07-14T19:00:00.000Z",
   "contents": {
-    "SKILL.md": {
-      "type": "file",
-      "mimeType": "text/markdown",
-      "content": "---\nname: project-brief\ndescription: ...\n---\n"
-    },
-    "example-homepage.html": {
-      "type": "url",
-      "url": "https://www.example.com/"
-    },
-    "examples": {
-      "id": "skill-dir-project-brief-examples",
-      "type": "directory",
-      "name": "examples"
-    }
+    "object": "list",
+    "results": [
+      {
+        "name": "SKILL.md",
+        "type": "file",
+        "mimeType": "text/markdown",
+        "content": "---\nname: project-brief\ndescription: ...\n---\n"
+      },
+      {
+        "name": "example-homepage.html",
+        "type": "url",
+        "url": "https://www.example.com/"
+      },
+      {
+        "id": "skill-dir-project-brief-examples",
+        "type": "directory",
+        "name": "examples"
+      }
+    ],
+    "next_cursor": null,
+    "has_more": false,
+    "type": "content",
+    "content": {}
   }
 }
 ```
 
-Directory entries are shallow. When an entry has `type: "directory"`, the client follows its `id` with another request to the same endpoint and repeats until it reaches files or URLs. Root and descendant directories are fetchable only when they belong to an exposed skill tree. Unknown directories return `404`; an invalid configured token returns `401`.
+Both GET endpoints use Notion-style pagination. `page_size` defaults to 100 and accepts 1–100; `start_cursor` is an opaque value returned as `next_cursor`. Clients continue while `has_more` is true. Plugin results use the `plugin` list type, and a directory's `contents` uses the `content` list type.
+
+Directory entries are shallow. Each result carries its materialized `name`. When an entry has `type: "directory"`, the client follows its `id` with another request to the same endpoint and repeats until it reaches files or URLs. Root and descendant directories are fetchable only when they belong to an exposed skill tree. Unknown directories return `404`; invalid pagination input returns `400`; an invalid configured token returns `401`.
 
 ## Optional prototype authentication
 
@@ -167,9 +183,9 @@ DEMO_API_TOKEN=local-secret pnpm reference-client sync \
 
 The client compares each plugin's `updatedAt` with `installed-plugins/.notion-plugin-sync.json`. Unchanged timestamps skip that plugin's directory requests. For this prototype, changing any plugin metadata or descendant content requires bumping the plugin's `updatedAt` in the mock data.
 
-Changed plugins are refreshed by recursively following every child directory ID. The complete tree is built in a temporary transaction directory before the existing installation is replaced. Failures roll back the prior version, full replacement removes stale files, and state is atomically updated last.
+Changed plugins are refreshed by following all plugin and directory-content pages, then recursively following every child directory ID. The complete tree is built in a temporary transaction directory before the existing installation is replaced. Failures roll back the prior version, full replacement removes stale files, and state is atomically updated last.
 
-The mock `project-brief` directory includes an HTTPS URL node. The client downloads it as `example-homepage.html`; tests mock the remote response to remain deterministic. Downloads require `https:`, follow redirects only when the final URL remains HTTPS, time out after 10 seconds, and are limited to 10 MiB. Every server-provided ID, directory name, and content key is validated as a single safe path segment.
+The mock `project-brief` directory includes an HTTPS URL node. The client downloads it as `example-homepage.html`; tests mock the remote response to remain deterministic. Downloads require `https:`, follow redirects only when the final URL remains HTTPS, time out after 10 seconds, and are limited to 10 MiB. Every server-provided ID, directory name, and entry name is validated as a single safe path segment.
 
 ## Tests and validation
 
@@ -180,7 +196,7 @@ pnpm test
 pnpm build
 ```
 
-Tests cover hashing, API success/errors/auth, recursive materialization, traversal and protocol rejection, timestamp-based unchanged skipping, stale cleanup, and interrupted-sync safety.
+Tests cover hashing, API success/errors/auth/pagination, recursive and paginated materialization, traversal and protocol rejection, timestamp-based unchanged skipping, stale cleanup, and interrupted-sync safety.
 
 ## Deploy to Vercel
 
